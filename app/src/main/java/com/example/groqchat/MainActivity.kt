@@ -34,7 +34,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            LoneAITheme {
+            LoneAITheme(darkTheme = true) {
                 RootScreen()
             }
         }
@@ -46,6 +46,9 @@ private fun prefs(context: Context) = context.getSharedPreferences("prefs", Cont
 private fun getApiKey(context: Context): String = prefs(context).getString("api_key", "") ?: ""
 private fun saveApiKey(context: Context, key: String) { prefs(context).edit().putString("api_key", key).apply() }
 
+private fun getUserName(context: Context): String = prefs(context).getString("user_name", "") ?: ""
+private fun saveUserName(context: Context, name: String) { prefs(context).edit().putString("user_name", name).apply() }
+
 private fun getGithubOwner(context: Context): String = prefs(context).getString("gh_owner", "") ?: ""
 private fun getGithubRepo(context: Context): String = prefs(context).getString("gh_repo", "") ?: ""
 private fun getGithubToken(context: Context): String = prefs(context).getString("gh_token", "") ?: ""
@@ -55,6 +58,13 @@ private fun saveGithubConfig(context: Context, owner: String, repo: String, toke
         .putString("gh_repo", repo)
         .putString("gh_token", token)
         .apply()
+}
+
+private fun greetingForHour(hour: Int): String = when (hour) {
+    in 5..11 -> "Good morning"
+    in 12..16 -> "Good afternoon"
+    in 17..21 -> "Good evening"
+    else -> "Hey"
 }
 
 private fun looksLikeAppBuildRequest(text: String): Boolean {
@@ -84,19 +94,21 @@ fun RootScreen() {
     var owner by remember { mutableStateOf(getGithubOwner(context)) }
     var repo by remember { mutableStateOf(getGithubRepo(context)) }
     var token by remember { mutableStateOf(getGithubToken(context)) }
+    var userName by remember { mutableStateOf(getUserName(context)) }
 
     Column(Modifier.fillMaxSize()) {
         Box(Modifier.weight(1f)) {
             when (tab) {
                 0 -> ChatScreen(
-                    apiKey = apiKey, owner = owner, repo = repo, token = token,
+                    apiKey = apiKey, owner = owner, repo = repo, token = token, userName = userName,
                     onNeedsSetup = { tab = 1 }
                 )
                 else -> SettingsScreen(
-                    apiKey = apiKey, owner = owner, repo = repo, token = token,
-                    onSave = { k, o, r, t ->
-                        apiKey = k; owner = o; repo = r; token = t
+                    apiKey = apiKey, owner = owner, repo = repo, token = token, userName = userName,
+                    onSave = { k, o, r, t, name ->
+                        apiKey = k; owner = o; repo = r; token = t; userName = name
                         saveApiKey(context, k)
+                        saveUserName(context, name)
                         saveGithubConfig(context, o, r, t)
                     }
                 )
@@ -121,7 +133,7 @@ fun RootScreen() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ChatScreen(apiKey: String, owner: String, repo: String, token: String, onNeedsSetup: () -> Unit) {
+fun ChatScreen(apiKey: String, owner: String, repo: String, token: String, userName: String, onNeedsSetup: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val db = remember { AppDatabase.get(context) }
     val scope = rememberCoroutineScope()
@@ -218,7 +230,7 @@ fun ChatScreen(apiKey: String, owner: String, repo: String, token: String, onNee
             ConversationView(
                 conversationId = convId,
                 db = db,
-                apiKey = apiKey, owner = owner, repo = repo, token = token,
+                apiKey = apiKey, owner = owner, repo = repo, token = token, userName = userName,
                 onNeedsSetup = onNeedsSetup,
                 onMenuClick = { scope.launch { drawerState.open() } }
             )
@@ -254,7 +266,7 @@ private fun entityToArtifact(e: MessageEntity): Artifact {
 fun ConversationView(
     conversationId: String,
     db: AppDatabase,
-    apiKey: String, owner: String, repo: String, token: String,
+    apiKey: String, owner: String, repo: String, token: String, userName: String,
     onNeedsSetup: () -> Unit,
     onMenuClick: () -> Unit
 ) {
@@ -268,9 +280,6 @@ fun ConversationView(
         db.conversationDao().getMessagesForConversation(conversationId)
     }.collectAsState(initial = emptyList())
 
-    // Live progress for a task currently running in THIS composition. Once
-    // done, the result is persisted, so switching away and back (or fully
-    // restarting the app) always shows it from the database, not this state.
     var liveSteps by remember(conversationId) { mutableStateOf<Pair<androidx.compose.runtime.snapshots.SnapshotStateList<String>, MutableState<Boolean>>?>(null) }
 
     var editingArtifact by remember { mutableStateOf<Artifact?>(null) }
@@ -312,52 +321,75 @@ fun ConversationView(
         scope.launch { db.conversationDao().insertMessage(MessageEntity(conversationId = conversationId, kind = "apk", content = path, timestamp = System.currentTimeMillis())) }
     }
 
+    val isEmpty = persistedMessages.isEmpty() && liveSteps == null
+
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Lone AI") },
-                navigationIcon = { IconButton(onClick = onMenuClick) { Icon(Icons.Filled.Menu, contentDescription = "Menu") } }
+                title = {},
+                navigationIcon = { IconButton(onClick = onMenuClick) { Icon(Icons.Filled.Menu, contentDescription = "Menu") } },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
             )
-        }
+        },
+        containerColor = MaterialTheme.colorScheme.background
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.weight(1f).fillMaxWidth().padding(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(persistedMessages, key = { it.id }) { e ->
-                    when (e.kind) {
-                        "text" -> MessageBubble(role = e.role ?: "assistant", content = e.content)
-                        "steps" -> StepsPanel(steps = e.content.split("\n"), inProgress = false)
-                        "artifact" -> ArtifactCard(
-                            artifact = entityToArtifact(e),
-                            onEdit = { editingArtifact = entityToArtifact(e) }
-                        )
-                        "apk" -> {
-                            val f = File(e.content)
-                            if (f.exists()) InstallApkRow(f)
-                            else Text("(built APK no longer available on this device)", style = MaterialTheme.typography.bodySmall)
+            if (isEmpty) {
+                GreetingEmptyState(userName = userName, modifier = Modifier.weight(1f))
+            } else {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.weight(1f).fillMaxWidth().padding(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(persistedMessages, key = { it.id }) { e ->
+                        when (e.kind) {
+                            "text" -> MessageBubble(role = e.role ?: "assistant", content = e.content)
+                            "steps" -> StepsPanel(steps = e.content.split("\n"), inProgress = false)
+                            "artifact" -> ArtifactCard(
+                                artifact = entityToArtifact(e),
+                                onEdit = { editingArtifact = entityToArtifact(e) }
+                            )
+                            "apk" -> {
+                                val f = File(e.content)
+                                if (f.exists()) InstallApkRow(f)
+                                else Text("(built APK no longer available on this device)", style = MaterialTheme.typography.bodySmall)
+                            }
                         }
                     }
-                }
-                liveSteps?.let { (steps, inProgress) ->
-                    item { StepsPanel(steps = steps, inProgress = inProgress.value) }
+                    liveSteps?.let { (steps, inProgress) ->
+                        item { StepsPanel(steps = steps, inProgress = inProgress.value) }
+                    }
                 }
             }
 
+            // Floating pill-shaped input bar
+            Surface(
+                shape = RoundedCornerShape(28.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp)
+            ) {
             Row(
-                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                OutlinedTextField(
+                androidx.compose.foundation.text.BasicTextField(
                     value = input,
                     onValueChange = { input = it },
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(20.dp),
-                    placeholder = { Text("Ask anything, or \"build/write/create…\"") }
+                    modifier = Modifier.weight(1f).padding(horizontal = 10.dp, vertical = 12.dp),
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurfaceVariant),
+                    cursorBrush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.primary),
+                    decorationBox = { inner ->
+                        if (input.isEmpty()) {
+                            Text(
+                                "Ask anything…",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                            )
+                        }
+                        inner()
+                    }
                 )
-                Spacer(Modifier.width(8.dp))
                 IconButton(onClick = {
                     val text = input.trim()
                     if (text.isBlank()) return@IconButton
@@ -433,9 +465,45 @@ fun ConversationView(
                         }
                     }
                 }) {
-                    Icon(Icons.Filled.Send, contentDescription = "Send")
+                    Icon(Icons.Filled.Send, contentDescription = "Send", tint = MaterialTheme.colorScheme.primary)
                 }
             }
+            }
+        }
+    }
+}
+
+@Composable
+fun GreetingEmptyState(userName: String, modifier: Modifier = Modifier) {
+    val hour = remember { java.time.LocalTime.now().hour }
+    val greeting = greetingForHour(hour)
+    Box(modifier = modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            androidx.compose.foundation.Canvas(modifier = Modifier.size(36.dp)) {
+                val strokeWidth = 3.dp.toPx()
+                for (i in 0 until 8) {
+                    val angle = (i * 45f) * (Math.PI / 180f)
+                    val cx = size.width / 2
+                    val cy = size.height / 2
+                    val r = size.minDimension / 2
+                    drawLine(
+                        color = androidx.compose.ui.graphics.Color(0xFF3E6BAE),
+                        start = androidx.compose.ui.geometry.Offset(cx, cy),
+                        end = androidx.compose.ui.geometry.Offset(
+                            cx + (r * kotlin.math.cos(angle)).toFloat(),
+                            cy + (r * kotlin.math.sin(angle)).toFloat()
+                        ),
+                        strokeWidth = strokeWidth,
+                        cap = androidx.compose.ui.graphics.StrokeCap.Round
+                    )
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            Text(
+                text = if (userName.isNotBlank()) "$greeting, $userName" else greeting,
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onBackground
+            )
         }
     }
 }
@@ -486,17 +554,27 @@ fun InstallApkRow(file: File) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
-    apiKey: String, owner: String, repo: String, token: String,
-    onSave: (String, String, String, String) -> Unit
+    apiKey: String, owner: String, repo: String, token: String, userName: String,
+    onSave: (String, String, String, String, String) -> Unit
 ) {
     var k by remember(apiKey) { mutableStateOf(apiKey) }
     var o by remember(owner) { mutableStateOf(owner) }
     var r by remember(repo) { mutableStateOf(repo) }
     var t by remember(token) { mutableStateOf(token) }
+    var n by remember(userName) { mutableStateOf(userName) }
     var saved by remember { mutableStateOf(false) }
 
     Scaffold(topBar = { TopAppBar(title = { Text("Settings") }) }) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize().padding(16.dp)) {
+            Text("Your name", fontWeight = FontWeight.Bold)
+            Text("Used for the greeting on a new chat. Optional.")
+            Spacer(Modifier.height(4.dp))
+            OutlinedTextField(
+                value = n, onValueChange = { n = it; saved = false },
+                singleLine = true, placeholder = { Text("e.g. Alex") }, modifier = Modifier.fillMaxWidth()
+            )
+
+            Spacer(Modifier.height(24.dp))
             Text("Groq API key", fontWeight = FontWeight.Bold)
             Text("Used for chat and for generating apps/content. Get one free at console.groq.com.")
             Spacer(Modifier.height(4.dp))
@@ -530,7 +608,7 @@ fun SettingsScreen(
             )
 
             Spacer(Modifier.height(16.dp))
-            Button(onClick = { onSave(k.trim(), o.trim(), r.trim(), t.trim()); saved = true }) { Text("Save") }
+            Button(onClick = { onSave(k.trim(), o.trim(), r.trim(), t.trim(), n.trim()); saved = true }) { Text("Save") }
             if (saved) {
                 Spacer(Modifier.height(8.dp))
                 Text("Saved.", color = MaterialTheme.colorScheme.primary)
